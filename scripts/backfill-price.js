@@ -3,8 +3,7 @@
  * backfill-price.js
  *
  * Discover and backfill vault/tranche share price data into CSV.
- * Supports direct contract addresses or Pareto app URLs, and can auto-resolve
- * tranche token -> minter proxy workflows common in Pareto vaults.
+ * Supports direct contract addresses or Pareto app URLs.
  */
 
 import fs from "fs";
@@ -14,19 +13,20 @@ import dotenv from "dotenv";
 
 dotenv.config();
 
-const DEFAULT_RPC_URL = "https://ethereum-rpc.publicnode.com/";
-const RPC_URL = process.env.RPC_URL || DEFAULT_RPC_URL;
 const ETHERSCAN_API_KEY = process.env.ETHERSCAN_API_KEY;
 const ENV_CONTRACT_ADDRESS = process.env.CONTRACT_ADDRESS || process.env.VAULT_ADDRESS;
 
-if (!RPC_URL) {
-  console.error("RPC_URL must be set in env");
-  process.exit(1);
-}
+const DEFAULT_RPC_URLS = [
+  "https://ethereum-rpc.publicnode.com/",
+  "https://eth.drpc.org",
+  "https://eth1.lava.build",
+];
 
-const provider = new ethers.JsonRpcProvider(RPC_URL);
-const MAX_RETRIES = 4;
+const MAX_RETRIES_PER_PROVIDER = 2;
 const RETRY_DELAY_MS = 500;
+
+let providerPool = [];
+let providerCursor = 0;
 
 function parseArgs() {
   const args = process.argv.slice(2);
@@ -64,6 +64,9 @@ function parseArgs() {
       case "--discover-only":
         out.discoverOnly = true;
         break;
+      case "--rpc-urls":
+        out.rpcUrls = args[++i];
+        break;
       default:
         console.warn(`unknown argument ${a}`);
     }
@@ -72,8 +75,7 @@ function parseArgs() {
 }
 
 function parseDateToUnixSeconds(dateStr) {
-  const iso = `${dateStr}T00:00:00Z`;
-  const ts = Math.floor(new Date(iso).getTime() / 1000);
+  const ts = Math.floor(new Date(`${dateStr}T00:00:00Z`).getTime() / 1000);
   if (!Number.isFinite(ts)) throw new Error(`invalid date: ${dateStr}`);
   return ts;
 }
@@ -82,21 +84,39 @@ function extractAddress(input) {
   if (!input || typeof input !== "string") return null;
   const trimmed = input.trim();
   if (ethers.isAddress(trimmed)) return ethers.getAddress(trimmed);
-
   const m = trimmed.match(/0x[a-fA-F0-9]{40}/);
   if (m && ethers.isAddress(m[0])) return ethers.getAddress(m[0]);
   return null;
 }
 
-async function getBlockByTime(targetTs, low = 0, high = null) {
-  if (high === null) high = await provider.getBlockNumber();
-  while (low < high) {
-    const mid = Math.floor((low + high + 1) / 2);
-    const block = await rpcWithRetry(() => provider.getBlock(mid));
-    if (Number(block.timestamp) <= targetTs) low = mid;
-    else high = mid - 1;
+function parseRpcUrls(opts) {
+  const fromArgs = (opts.rpcUrls || "")
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean);
+  const fromEnvList = (process.env.RPC_URLS || "")
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean);
+  const fromEnvSingle = (process.env.RPC_URL || "").trim();
+
+  const all = [...fromArgs, ...fromEnvList, ...(fromEnvSingle ? [fromEnvSingle] : []), ...DEFAULT_RPC_URLS];
+  const unique = [];
+  const seen = new Set();
+  for (const url of all) {
+    if (!url || seen.has(url)) continue;
+    seen.add(url);
+    unique.push(url);
   }
-  return low;
+  return unique;
+}
+
+function configureProviderPool(opts) {
+  const rpcUrls = parseRpcUrls(opts);
+  if (!rpcUrls.length) throw new Error("no RPC URLs configured");
+  providerPool = rpcUrls.map((url) => ({ url, provider: new ethers.JsonRpcProvider(url) }));
+  providerCursor = 0;
+  return rpcUrls;
 }
 
 async function sleep(ms) {
@@ -104,7 +124,7 @@ async function sleep(ms) {
 }
 
 function isRetriableRpcError(err) {
-  const msg = `${err?.shortMessage || ""} ${err?.message || ""}`.toLowerCase();
+  const msg = `${err?.shortMessage || ""} ${err?.message || ""} ${err?.info?.error?.message || ""}`.toLowerCase();
   return (
     msg.includes("503") ||
     msg.includes("500") ||
@@ -112,31 +132,60 @@ function isRetriableRpcError(err) {
     msg.includes("temporar") ||
     msg.includes("overflow") ||
     msg.includes("cannot fulfill request") ||
-    msg.includes("server response")
+    msg.includes("server response") ||
+    msg.includes("free tier") ||
+    msg.includes("rate limit") ||
+    msg.includes("request limit") ||
+    msg.includes("too many requests")
   );
 }
 
-async function rpcWithRetry(fn, retries = MAX_RETRIES) {
+async function rpcCall(task, retriesPerProvider = MAX_RETRIES_PER_PROVIDER) {
+  if (!providerPool.length) throw new Error("provider pool is not configured");
+
   let lastErr;
-  for (let i = 0; i < retries; i++) {
-    try {
-      return await fn();
-    } catch (err) {
-      lastErr = err;
-      if (!isRetriableRpcError(err) || i === retries - 1) throw err;
-      await sleep(RETRY_DELAY_MS * (i + 1));
+  const n = providerPool.length;
+  const order = [];
+  for (let i = 0; i < n; i++) order.push((providerCursor + i) % n);
+
+  for (const idx of order) {
+    const item = providerPool[idx];
+    for (let attempt = 0; attempt < retriesPerProvider; attempt++) {
+      try {
+        const result = await task(item.provider, item.url);
+        providerCursor = (idx + 1) % n;
+        return result;
+      } catch (err) {
+        lastErr = err;
+        if (!isRetriableRpcError(err)) throw err;
+        if (attempt < retriesPerProvider - 1) {
+          await sleep(RETRY_DELAY_MS * (attempt + 1));
+        }
+      }
     }
   }
-  throw lastErr;
+
+  throw lastErr || new Error("rpc call failed on all providers");
+}
+
+async function getBlockByTime(targetTs, low = 0, high = null) {
+  if (high === null) high = await rpcCall((p) => p.getBlockNumber());
+  while (low < high) {
+    const mid = Math.floor((low + high + 1) / 2);
+    const block = await rpcCall((p) => p.getBlock(mid));
+    if (Number(block.timestamp) <= targetTs) low = mid;
+    else high = mid - 1;
+  }
+  return low;
 }
 
 async function getDeployBlock(address) {
-  const latest = await rpcWithRetry(() => provider.getBlockNumber());
+  const latest = await rpcCall((p) => p.getBlockNumber());
   let low = 0;
   let high = latest;
   while (low < high) {
     const mid = Math.floor((low + high) / 2);
-    const code = await rpcWithRetry(() => provider.getCode(address, mid));
+    const code = await rpcCall((p) => p.getCode(address, mid));
     if (code && code !== "0x") high = mid;
     else low = mid + 1;
   }
@@ -145,29 +194,23 @@ async function getDeployBlock(address) {
 
 async function tryCall(address, abiSig, fnName, args = [], blockTag = "latest") {
   try {
-    const c = new ethers.Contract(address, [abiSig], provider);
-    const v = await rpcWithRetry(() => c[fnName](...args, { blockTag }));
-    return { ok: true, value: v };
+    const value = await rpcCall(async (provider) => {
+      const c = new ethers.Contract(address, [abiSig], provider);
+      return c[fnName](...args, { blockTag });
+    });
+    return { ok: true, value };
   } catch {
     return { ok: false };
   }
 }
 
 async function resolveMinter(tokenAddress, blockTag = "latest") {
-  const res = await tryCall(
-    tokenAddress,
-    "function minter() view returns (address)",
-    "minter",
-    [],
-    blockTag
-  );
+  const res = await tryCall(tokenAddress, "function minter() view returns (address)", "minter", [], blockTag);
   if (!res.ok) return null;
-  const candidate = res.value;
-  if (!ethers.isAddress(candidate)) return null;
-  const checksum = ethers.getAddress(candidate);
-  const code = await rpcWithRetry(() => provider.getCode(checksum, blockTag));
-  if (!code || code === "0x") return null;
-  return checksum;
+  if (!ethers.isAddress(res.value)) return null;
+  const checksum = ethers.getAddress(res.value);
+  const code = await rpcCall((p) => p.getCode(checksum, blockTag));
+  return code && code !== "0x" ? checksum : null;
 }
 
 async function resolveTokenSymbol(tokenAddress, blockTag = "latest") {
@@ -186,7 +229,7 @@ function preferredFunctionsFromSymbol(symbol) {
 }
 
 async function discoverPriceSource(inputAddress, opts) {
-  const latest = await provider.getBlockNumber();
+  const latest = await rpcCall((p) => p.getBlockNumber());
   const tokenSymbol = await resolveTokenSymbol(inputAddress, latest);
   const minter = await resolveMinter(inputAddress, latest);
 
@@ -213,7 +256,6 @@ async function discoverPriceSource(inputAddress, opts) {
     }
   }
 
-  // ERC4626 fallback
   for (const c of candidates) {
     const dec = await tryCall(c.address, "function decimals() view returns (uint8)", "decimals", [], latest);
     if (!dec.ok) continue;
@@ -241,11 +283,7 @@ async function discoverPriceSource(inputAddress, opts) {
     }
   }
 
-  throw new Error(
-    `could not discover price source for ${inputAddress}; tried candidates: ${candidates
-      .map((c) => c.address)
-      .join(", ")}`
-  );
+  throw new Error(`could not discover price source for ${inputAddress}; tried candidates: ${candidates.map((c) => c.address).join(", ")}`);
 }
 
 async function fetchAbiFromEtherscan(address) {
@@ -266,7 +304,7 @@ async function fetchAbiFromSourcify(address) {
       const resp = await axios.get(url, { timeout: 10000 });
       if (resp.data?.output?.abi) return resp.data.output.abi;
     } catch {
-      // continue
+      // keep trying
     }
   }
   throw new Error("sourcify abi lookup failed");
@@ -280,7 +318,6 @@ async function getAbiForAddress(address) {
   } catch {
     // fallback
   }
-
   try {
     const abi = await fetchAbiFromSourcify(address);
     console.log("fetched ABI from Sourcify");
@@ -288,35 +325,34 @@ async function getAbiForAddress(address) {
   } catch {
     // fallback
   }
-
-  return [
-    { type: "function", name: "price", stateMutability: "view", inputs: [], outputs: [{ type: "uint256" }] },
-    { type: "function", name: "tokenPrice", stateMutability: "view", inputs: [], outputs: [{ type: "uint256" }] },
-    { type: "function", name: "tranchePrice", stateMutability: "view", inputs: [], outputs: [{ type: "uint256" }] },
-    { type: "function", name: "priceAA", stateMutability: "view", inputs: [], outputs: [{ type: "uint256" }] },
-    { type: "function", name: "priceBB", stateMutability: "view", inputs: [], outputs: [{ type: "uint256" }] },
-    {
-      type: "function",
-      name: "convertToAssets",
-      stateMutability: "view",
-      inputs: [{ type: "uint256" }],
-      outputs: [{ type: "uint256" }],
-    },
-  ];
+  return [];
 }
 
-async function readPriceAtBlock(contract, discovery, block) {
+async function readPriceAtBlock(discovery, block) {
   if (discovery.mode === "direct") {
-    return contract[discovery.sourceFunction]({ blockTag: block });
+    const abiSig = `function ${discovery.sourceFunction}() view returns (uint256)`;
+    const res = await tryCall(discovery.sourceAddress, abiSig, discovery.sourceFunction, [], block);
+    if (!res.ok) throw new Error(`failed to read ${discovery.sourceFunction} at block ${block}`);
+    return res.value;
   }
   if (discovery.mode === "erc4626") {
-    return contract.convertToAssets(discovery.oneShare, { blockTag: block });
+    const res = await tryCall(
+      discovery.sourceAddress,
+      "function convertToAssets(uint256) view returns (uint256)",
+      "convertToAssets",
+      [discovery.oneShare],
+      block
+    );
+    if (!res.ok) throw new Error(`failed to read convertToAssets at block ${block}`);
+    return res.value;
   }
   throw new Error(`unsupported mode: ${discovery.mode}`);
 }
 
 async function main() {
   const opts = parseArgs();
+  const rpcUrls = configureProviderPool(opts);
+
   const rawTarget = opts.vault || opts.contractAddress || ENV_CONTRACT_ADDRESS;
   const inputAddress = extractAddress(rawTarget);
   if (!inputAddress) {
@@ -324,39 +360,25 @@ async function main() {
     process.exit(1);
   }
 
-  const network = await rpcWithRetry(() => provider.getNetwork());
+  const network = await rpcCall((p) => p.getNetwork());
   if (network.chainId !== 1n) {
-    throw new Error(`unsupported chainId ${network.chainId.toString()}; this script currently assumes Ethereum mainnet`);
+    throw new Error(`unsupported chainId ${network.chainId.toString()}; currently Ethereum mainnet only`);
   }
 
   const discovery = await discoverPriceSource(inputAddress, opts);
   const sourceAddress = discovery.sourceAddress;
 
-  let readAbi;
-  if (discovery.mode === "direct") {
-    readAbi = [`function ${discovery.sourceFunction}() view returns (uint256)`];
-  } else if (discovery.mode === "erc4626") {
-    readAbi = ["function convertToAssets(uint256) view returns (uint256)"];
-  } else {
-    throw new Error(`unsupported discovery mode: ${discovery.mode}`);
-  }
-  const contract = new ethers.Contract(sourceAddress, readAbi, provider);
+  await getAbiForAddress(sourceAddress);
 
-  const latestBlock = await rpcWithRetry(() => provider.getBlockNumber());
+  const latestBlock = await rpcCall((p) => p.getBlockNumber());
   const deployBlock = await getDeployBlock(sourceAddress);
-  const deployMeta = await rpcWithRetry(() => provider.getBlock(deployBlock));
+  const deployMeta = await rpcCall((p) => p.getBlock(deployBlock));
 
   let startBlock = opts.startBlock;
   let endBlock = opts.endBlock;
 
-  if (opts.startDate) {
-    const ts = parseDateToUnixSeconds(opts.startDate);
-    startBlock = await getBlockByTime(ts, 0, latestBlock);
-  }
-  if (opts.endDate) {
-    const ts = parseDateToUnixSeconds(opts.endDate);
-    endBlock = await getBlockByTime(ts, 0, latestBlock);
-  }
+  if (opts.startDate) startBlock = await getBlockByTime(parseDateToUnixSeconds(opts.startDate), 0, latestBlock);
+  if (opts.endDate) endBlock = await getBlockByTime(parseDateToUnixSeconds(opts.endDate), 0, latestBlock);
 
   if (startBlock == null) startBlock = deployBlock;
   if (endBlock == null) endBlock = latestBlock;
@@ -365,10 +387,9 @@ async function main() {
     console.warn(`start block ${startBlock} is before source deployment block ${deployBlock}; clamping to deploy block`);
     startBlock = deployBlock;
   }
-  if (endBlock < startBlock) {
-    throw new Error(`end block ${endBlock} is less than start block ${startBlock}`);
-  }
+  if (endBlock < startBlock) throw new Error(`end block ${endBlock} is less than start block ${startBlock}`);
 
+  console.log(`rpc pool (${rpcUrls.length}): ${rpcUrls.join(", ")}`);
   console.log(`input address: ${inputAddress}`);
   if (discovery.minterAddress) console.log(`resolved minter: ${discovery.minterAddress}`);
   if (discovery.tokenSymbol) console.log(`token symbol: ${discovery.tokenSymbol}`);
@@ -385,16 +406,17 @@ async function main() {
 
   const outfile = opts.outfile || "price-history.csv";
   const stream = fs.createWriteStream(outfile, { flags: "w" });
-  stream.write("date,block,price\n");
+  const networkLabel = `ethereum:${network.chainId.toString()}`;
+  stream.write("date,block,price,address,network,method\n");
 
   let lastDate = "";
   for (let block = startBlock; block <= endBlock; ) {
-    const blk = await rpcWithRetry(() => provider.getBlock(block));
-    const price = await readPriceAtBlock(contract, discovery, block);
+    const blk = await rpcCall((p) => p.getBlock(block));
+    const price = await readPriceAtBlock(discovery, block);
     const date = new Date(Number(blk.timestamp) * 1000).toISOString().slice(0, 10);
 
     if (date !== lastDate) {
-      stream.write(`${date},${block},${price.toString()}\n`);
+      stream.write(`${date},${block},${price.toString()},${sourceAddress},${networkLabel},${discovery.sourceFunction}\n`);
       lastDate = date;
     }
 

@@ -9,8 +9,11 @@ npm install
 cp .env.example .env
 ```
 
-Set `RPC_URL` in `.env`. For reliable runs, use an archive-capable endpoint.  
-Useful fallback: `https://eth.drpc.org`.
+Set `RPC_URL` or `RPC_URLS` in `.env`.  
+The script also has built-in defaults and will split load/fail over across:
+- `https://ethereum-rpc.publicnode.com/`
+- `https://eth.drpc.org`
+- `https://eth1.lava.build`
 
 ## LLM-Friendly Quick Start
 
@@ -21,7 +24,7 @@ If you have a link like:
 run:
 
 ```bash
-RPC_URL=https://eth.drpc.org node scripts/backfill-price.js \
+node scripts/backfill-price.js \
   --vault 'https://app.pareto.credit/vault#0x...' \
   --block-step 7200 \
   --out vault.csv
@@ -46,7 +49,7 @@ date,block,price
 Fast sampled backfill (recommended):
 
 ```bash
-RPC_URL=https://eth.drpc.org node scripts/backfill-price.js \
+node scripts/backfill-price.js \
   --vault 'https://app.pareto.credit/vault#0xEC6a70F62a83418c7fb238182eD2865F80491a8B' \
   --block-step 7200 \
   --out rockawayx.csv
@@ -55,7 +58,7 @@ RPC_URL=https://eth.drpc.org node scripts/backfill-price.js \
 Exact daily backfill (slower):
 
 ```bash
-RPC_URL=https://eth.drpc.org node scripts/backfill-price.js \
+node scripts/backfill-price.js \
   --vault 'https://app.pareto.credit/vault#0xEC6a70F62a83418c7fb238182eD2865F80491a8B' \
   --out rockawayx-daily.csv
 ```
@@ -63,7 +66,7 @@ RPC_URL=https://eth.drpc.org node scripts/backfill-price.js \
 Discovery only (no file output):
 
 ```bash
-RPC_URL=https://eth.drpc.org node scripts/backfill-price.js \
+node scripts/backfill-price.js \
   --vault 'https://app.pareto.credit/vault#0x...' \
   --discover-only
 ```
@@ -80,11 +83,12 @@ RPC_URL=https://eth.drpc.org node scripts/backfill-price.js \
 - `--block-step <number>` fast sampling mode
 - `--out <file.csv>` (default `price-history.csv`)
 - `--discover-only`
+- `--rpc-urls <url1,url2,...>` override RPC pool order
 
 Notes:
 - Date parsing uses UTC midnight (`YYYY-MM-DDT00:00:00Z`).
 - If `--start-block` is earlier than source deployment, it is clamped to deploy block.
-- Some RPC providers are not archive-capable and cannot serve historical state.
+- Script distributes RPC calls across the configured pool and retries/fails over on transient timeout/rate-limit/server errors.
 
 ## Dump Participant Addresses
 
