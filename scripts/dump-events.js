@@ -7,7 +7,7 @@
  * discovering which wallets interact with the vault.
  *
  * Usage:
- *   node scripts/dump-events.js [--start-block N] [--end-block N] [--out file.txt]
+ *   node scripts/dump-events.js [--contract-address 0x...] [--start-block N] [--end-block N] [--out file.txt]
  *
  * The script will fetch the ABI from Etherscan (if an API key is provided)
  * so it can decode events.  Logs are queried directly from the RPC provider.
@@ -20,12 +20,12 @@ import dotenv from "dotenv";
 
 dotenv.config();
 
-const VAULT_ADDRESS = process.env.VAULT_ADDRESS;
+const ENV_CONTRACT_ADDRESS = process.env.CONTRACT_ADDRESS || process.env.VAULT_ADDRESS;
 const RPC_URL = process.env.RPC_URL;
 const ETHERSCAN_API_KEY = process.env.ETHERSCAN_API_KEY;
 
-if (!VAULT_ADDRESS || !RPC_URL) {
-  console.error("VAULT_ADDRESS and RPC_URL must be set in .env");
+if (!RPC_URL) {
+  console.error("RPC_URL must be set in .env");
   process.exit(1);
 }
 
@@ -45,6 +45,9 @@ function parseArgs() {
         break;
       case "--out":
         out.outfile = args[++i];
+        break;
+      case "--contract-address":
+        out.contractAddress = args[++i];
         break;
       default:
         console.warn(`unknown argument ${a}`);
@@ -67,13 +70,18 @@ async function fetchAbi(address) {
 
 async function main() {
   const opts = parseArgs();
+  const contractAddress = opts.contractAddress || ENV_CONTRACT_ADDRESS;
+  if (!contractAddress) {
+    console.error("set CONTRACT_ADDRESS/VAULT_ADDRESS in env or pass --contract-address");
+    process.exit(1);
+  }
   let startBlock = opts.startBlock || 0;
   let endBlock = opts.endBlock;
   if (!endBlock) endBlock = await provider.getBlockNumber();
 
   let abi;
   try {
-    abi = await fetchAbi(VAULT_ADDRESS);
+    abi = await fetchAbi(contractAddress);
   } catch (err) {
     console.warn("could not fetch ABI, events will not be decoded");
     abi = [];
@@ -87,7 +95,7 @@ async function main() {
     const to = Math.min(from + step - 1, endBlock);
     console.log(`querying logs ${from}-${to}`);
     const logs = await provider.getLogs({
-      address: VAULT_ADDRESS,
+      address: contractAddress,
       fromBlock: from,
       toBlock: to,
     });
@@ -120,9 +128,7 @@ async function main() {
   console.log(`wrote ${unique.size} addresses to ${outfile}`);
 }
 
-if (require.main === module) {
-  main().catch((e) => {
-    console.error(e);
-    process.exit(1);
-  });
-}
+main().catch((e) => {
+  console.error(e);
+  process.exit(1);
+});
