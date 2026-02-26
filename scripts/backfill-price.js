@@ -16,11 +16,28 @@ dotenv.config();
 const ETHERSCAN_API_KEY = process.env.ETHERSCAN_API_KEY;
 const ENV_CONTRACT_ADDRESS = process.env.CONTRACT_ADDRESS || process.env.VAULT_ADDRESS;
 
-const DEFAULT_RPC_URLS = [
-  "https://ethereum-rpc.publicnode.com/",
-  "https://eth.drpc.org",
-  "https://eth1.lava.build",
-];
+const NETWORKS = {
+  ethereum: {
+    chainId: 1,
+    sourcifyChainId: 1,
+    explorer: "https://etherscan.io/",
+    rpcUrls: [
+      "https://ethereum-rpc.publicnode.com/",
+      "https://eth.drpc.org",
+      "https://eth1.lava.build",
+    ],
+  },
+  base: {
+    chainId: 8453,
+    sourcifyChainId: 8453,
+    explorer: "https://basescan.org/",
+    rpcUrls: [
+      "https://base-rpc.publicnode.com",
+      "https://base.lava.build",
+      "https://base.drpc.org",
+    ],
+  },
+};
 
 const MAX_RETRIES_PER_PROVIDER = 2;
 const RETRY_DELAY_MS = 500;
@@ -67,6 +84,9 @@ function parseArgs() {
       case "--rpc-urls":
         out.rpcUrls = args[++i];
         break;
+      case "--chain":
+        out.chain = args[++i];
+        break;
       default:
         console.warn(`unknown argument ${a}`);
     }
@@ -89,18 +109,46 @@ function extractAddress(input) {
   return null;
 }
 
-function parseRpcUrls(opts) {
+function normalizeChainKey(raw) {
+  if (!raw) return null;
+  const k = raw.toLowerCase().trim();
+  if (k === "mainnet" || k === "eth") return "ethereum";
+  if (k === "base-mainnet") return "base";
+  return k;
+}
+
+function inferChainKey(input) {
+  const s = String(input || "").toLowerCase();
+  if (s.includes("/base/") || s.includes("basescan.org")) return "base";
+  if (s.includes("/ethereum/") || s.includes("etherscan.io")) return "ethereum";
+  return null;
+}
+
+function parseRpcUrls(opts, chainKey, chainCfg) {
   const fromArgs = (opts.rpcUrls || "")
     .split(",")
     .map((s) => s.trim())
     .filter(Boolean);
+  const chainEnvPrefix = chainKey.toUpperCase();
+  const fromChainEnvList = (process.env[`${chainEnvPrefix}_RPC_URLS`] || "")
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean);
+  const fromChainEnvSingle = (process.env[`${chainEnvPrefix}_RPC_URL`] || "").trim();
   const fromEnvList = (process.env.RPC_URLS || "")
     .split(",")
     .map((s) => s.trim())
     .filter(Boolean);
   const fromEnvSingle = (process.env.RPC_URL || "").trim();
 
-  const all = [...fromArgs, ...fromEnvList, ...(fromEnvSingle ? [fromEnvSingle] : []), ...DEFAULT_RPC_URLS];
+  const all = [
+    ...fromArgs,
+    ...fromChainEnvList,
+    ...(fromChainEnvSingle ? [fromChainEnvSingle] : []),
+    ...fromEnvList,
+    ...(fromEnvSingle ? [fromEnvSingle] : []),
+    ...chainCfg.rpcUrls,
+  ];
   const unique = [];
   const seen = new Set();
   for (const url of all) {
@@ -111,8 +159,8 @@ function parseRpcUrls(opts) {
   return unique;
 }
 
-function configureProviderPool(opts) {
-  const rpcUrls = parseRpcUrls(opts);
+function configureProviderPool(opts, chainKey, chainCfg) {
+  const rpcUrls = parseRpcUrls(opts, chainKey, chainCfg);
   if (!rpcUrls.length) throw new Error("no RPC URLs configured");
   providerPool = rpcUrls.map((url) => ({ url, provider: new ethers.JsonRpcProvider(url) }));
   providerCursor = 0;
@@ -136,7 +184,9 @@ function isRetriableRpcError(err) {
     msg.includes("free tier") ||
     msg.includes("rate limit") ||
     msg.includes("request limit") ||
-    msg.includes("too many requests")
+    msg.includes("too many requests") ||
+    msg.includes("historical state") ||
+    msg.includes("not available")
   );
 }
 
@@ -286,18 +336,18 @@ async function discoverPriceSource(inputAddress, opts) {
   throw new Error(`could not discover price source for ${inputAddress}; tried candidates: ${candidates.map((c) => c.address).join(", ")}`);
 }
 
-async function fetchAbiFromEtherscan(address) {
+async function fetchAbiFromEtherscan(address, chainId) {
   if (!ETHERSCAN_API_KEY) throw new Error("ETHERSCAN_API_KEY not set");
-  const url = `https://api.etherscan.io/v2/api?chainid=1&module=contract&action=getabi&address=${address}&apikey=${ETHERSCAN_API_KEY}`;
+  const url = `https://api.etherscan.io/v2/api?chainid=${chainId}&module=contract&action=getabi&address=${address}&apikey=${ETHERSCAN_API_KEY}`;
   const resp = await axios.get(url);
   if (resp.data.status !== "1") throw new Error(resp.data.result || "etherscan abi lookup failed");
   return JSON.parse(resp.data.result);
 }
 
-async function fetchAbiFromSourcify(address) {
+async function fetchAbiFromSourcify(address, sourcifyChainId) {
   const endpoints = [
-    `https://repo.sourcify.dev/contracts/full_match/1/${address}/metadata.json`,
-    `https://repo.sourcify.dev/contracts/partial_match/1/${address}/metadata.json`,
+    `https://repo.sourcify.dev/contracts/full_match/${sourcifyChainId}/${address}/metadata.json`,
+    `https://repo.sourcify.dev/contracts/partial_match/${sourcifyChainId}/${address}/metadata.json`,
   ];
   for (const url of endpoints) {
     try {
@@ -310,16 +360,16 @@ async function fetchAbiFromSourcify(address) {
   throw new Error("sourcify abi lookup failed");
 }
 
-async function getAbiForAddress(address) {
+async function getAbiForAddress(address, chainCfg) {
   try {
-    const abi = await fetchAbiFromEtherscan(address);
+    const abi = await fetchAbiFromEtherscan(address, chainCfg.chainId);
     console.log("fetched ABI from Etherscan");
     return abi;
   } catch {
     // fallback
   }
   try {
-    const abi = await fetchAbiFromSourcify(address);
+    const abi = await fetchAbiFromSourcify(address, chainCfg.sourcifyChainId);
     console.log("fetched ABI from Sourcify");
     return abi;
   } catch {
@@ -351,7 +401,6 @@ async function readPriceAtBlock(discovery, block) {
 
 async function main() {
   const opts = parseArgs();
-  const rpcUrls = configureProviderPool(opts);
 
   const rawTarget = opts.vault || opts.contractAddress || ENV_CONTRACT_ADDRESS;
   const inputAddress = extractAddress(rawTarget);
@@ -360,15 +409,25 @@ async function main() {
     process.exit(1);
   }
 
+  const chainKey = normalizeChainKey(opts.chain) || inferChainKey(rawTarget) || "ethereum";
+  const chainCfg = NETWORKS[chainKey];
+  if (!chainCfg) {
+    throw new Error(`unsupported chain: ${chainKey}; supported: ${Object.keys(NETWORKS).join(", ")}`);
+  }
+
+  const rpcUrls = configureProviderPool(opts, chainKey, chainCfg);
+
   const network = await rpcCall((p) => p.getNetwork());
-  if (network.chainId !== 1n) {
-    throw new Error(`unsupported chainId ${network.chainId.toString()}; currently Ethereum mainnet only`);
+  if (network.chainId !== BigInt(chainCfg.chainId)) {
+    throw new Error(
+      `rpc/network mismatch: expected chainId ${chainCfg.chainId} (${chainKey}) got ${network.chainId.toString()}`
+    );
   }
 
   const discovery = await discoverPriceSource(inputAddress, opts);
   const sourceAddress = discovery.sourceAddress;
 
-  await getAbiForAddress(sourceAddress);
+  await getAbiForAddress(sourceAddress, chainCfg);
 
   const latestBlock = await rpcCall((p) => p.getBlockNumber());
   const deployBlock = await getDeployBlock(sourceAddress);
@@ -406,7 +465,7 @@ async function main() {
 
   const outfile = opts.outfile || "price-history.csv";
   const stream = fs.createWriteStream(outfile, { flags: "w" });
-  const networkLabel = `ethereum:${network.chainId.toString()}`;
+  const networkLabel = `${chainKey}:${network.chainId.toString()}`;
   stream.write("date,block,price\n");
 
   let lastDate = "";
@@ -463,6 +522,7 @@ async function main() {
   stream.write(`# Average APR: ${avgAprPct}\n`);
   stream.write(`# Method: ${discovery.sourceFunction}\n`);
   stream.write(`# Network: ${networkLabel}\n`);
+  stream.write(`# Explorer: ${chainCfg.explorer}\n`);
   stream.end();
   console.log(`output written to ${outfile}`);
 }

@@ -9,11 +9,19 @@ npm install
 cp .env.example .env
 ```
 
-Set `RPC_URL` or `RPC_URLS` in `.env`.  
-The script also has built-in defaults and will split load/fail over across:
-- `https://ethereum-rpc.publicnode.com/`
-- `https://eth.drpc.org`
-- `https://eth1.lava.build`
+No private keys are required.
+
+Set `RPC_URL` or `RPC_URLS` in `.env` only if you want to override defaults.  
+Built-in public RPC pools:
+
+- Ethereum:
+  - `https://ethereum-rpc.publicnode.com/`
+  - `https://eth.drpc.org`
+  - `https://eth1.lava.build`
+- Base:
+  - `https://base-rpc.publicnode.com`
+  - `https://base.lava.build`
+  - `https://base.drpc.org`
 
 ## LLM-Friendly Quick Start
 
@@ -24,6 +32,7 @@ run:
 ```bash
 node scripts/backfill-price.js \
   --vault 'https://some-app.example/vault/0x...' \
+  --chain ethereum \
   --block-step 7200 \
   --out vault.csv
 ```
@@ -82,6 +91,7 @@ node scripts/backfill-price.js \
 ## Backfill Arguments
 
 - `--vault <url_or_address>` preferred input
+- `--chain <ethereum|base>` optional override (otherwise inferred from URL when possible)
 - `--contract-address <address>` alternate explicit input
 - `--price-fn <name>` force specific function
 - `--start-date YYYY-MM-DD`
@@ -98,6 +108,8 @@ Notes:
 - If `--start-block` is earlier than source deployment, it is clamped to deploy block.
 - Script distributes RPC calls across the configured pool and retries/fails over on transient timeout/rate-limit/server errors.
 - `method` and `network` are included in the footer summary (not per-row columns).
+- For Base links, chain is inferred from `/base/` in the URL; you can also pass `--chain base`.
+- Base explorer: `https://basescan.org/`
 
 ## Dump Participant Addresses
 
