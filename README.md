@@ -23,6 +23,57 @@ Built-in public RPC pools:
   - `https://base.lava.build`
   - `https://base.drpc.org`
 
+## Code Structure
+
+The codebase is organized into modular, LLM-friendly components:
+
+### Core Modules (`lib/`)
+
+- **`config.js`** – Constants, network configurations, and chain aliases
+  - Network definitions (Ethereum, Base)
+  - RPC retry settings and timeouts
+  - Price function detection lists (priceAA, priceBB, etc.)
+  - Error patterns for retry logic
+
+- **`utils.js`** – Shared utility functions
+  - `parseArgs()` – CLI argument parsing
+  - `extractAddress()` – Extract Ethereum addresses from strings/URLs
+  - `normalizeChainKey()` – Normalize chain names with aliasing
+  - `tryCall()` – Safe contract call execution with error handling
+  - Date/time helper functions
+
+- **`provider.js`** – RPC provider pool management
+  - `initializeProviderPool()` – Set up multi-provider failover
+  - `rpcCall()` – Execute RPC calls with automatic retry and failover
+  - `getBlockByTime()` – Binary search to find block at timestamp
+  - `getDeployBlock()` – Find contract deployment block
+
+- **`discovery.js`** – Smart contract discovery
+  - `discoverPriceSource()` – Auto-detect price function and mode (direct/ERC4626)
+  - `resolveTokenSymbol()` – Get token symbol from contract
+  - `resolveMinter()` – Resolve minter address
+  - `getAbiForAddress()` – Fetch ABI from Etherscan or Sourcify
+
+### Scripts
+
+- **`scripts/backfill-price.js`** – Main price history backfill tool
+  - Accepts vault URLs or contract addresses
+  - Auto-discovers price function and deployment block
+  - Supports fast block-step sampling or exact daily backfill
+  - Outputs CSV with date, block, price and optional summary
+
+- **`scripts/dump-events.js`** – Extract participant addresses from logs
+  - Queries contract event logs in chunks
+  - Decodes events with fetched ABI
+  - Extracts unique Ethereum addresses
+  - Falls back to topic parsing if ABI unavailable
+
+### Configuration
+
+- **`.env.example`** – Template for environment variables
+- **`.prettierrc`** – Opinionated code formatting (120 char line width)
+- **`.gitignore`** – Standard Node.js/development ignores
+
 ## LLM-Friendly Quick Start
 
 If you have any link containing a vault address (or a raw `0x...` address):
