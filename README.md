@@ -99,7 +99,7 @@ Default range is `deployment -> latest`.
 ## CSV Output
 
 ```csv
-date,block,price
+date,block,price,delta
 ```
 
 Footer summary is appended at the end of the file:
