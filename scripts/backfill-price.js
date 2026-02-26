@@ -3,7 +3,7 @@
  * backfill-price.js
  *
  * Discover and backfill vault/tranche share price data into CSV.
- * Supports direct contract addresses or Pareto app URLs.
+ * Supports direct contract addresses or any URL containing an address.
  */
 
 import fs from "fs";
@@ -407,16 +407,26 @@ async function main() {
   const outfile = opts.outfile || "price-history.csv";
   const stream = fs.createWriteStream(outfile, { flags: "w" });
   const networkLabel = `ethereum:${network.chainId.toString()}`;
-  stream.write("date,block,price,address,network,method\n");
+  stream.write("date,block,price\n");
 
   let lastDate = "";
+  let firstTs = null;
+  let lastTs = null;
+  let firstPrice = null;
+  let lastPrice = null;
   for (let block = startBlock; block <= endBlock; ) {
     const blk = await rpcCall((p) => p.getBlock(block));
     const price = await readPriceAtBlock(discovery, block);
     const date = new Date(Number(blk.timestamp) * 1000).toISOString().slice(0, 10);
 
     if (date !== lastDate) {
-      stream.write(`${date},${block},${price.toString()},${sourceAddress},${networkLabel},${discovery.sourceFunction}\n`);
+      stream.write(`${date},${block},${price.toString()}\n`);
+      if (firstTs === null) {
+        firstTs = Number(blk.timestamp);
+        firstPrice = Number(price);
+      }
+      lastTs = Number(blk.timestamp);
+      lastPrice = Number(price);
       lastDate = date;
     }
 
@@ -434,6 +444,25 @@ async function main() {
     block = nextBlock;
   }
 
+  const days =
+    firstTs != null && lastTs != null ? Math.max(1, Math.round((lastTs - firstTs) / 86400)) : 0;
+  let avgAprPct = "n/a";
+  if (
+    Number.isFinite(firstPrice) &&
+    Number.isFinite(lastPrice) &&
+    firstPrice > 0 &&
+    lastPrice > 0 &&
+    days > 0
+  ) {
+    const apr = (Math.pow(lastPrice / firstPrice, 365 / days) - 1) * 100;
+    avgAprPct = `${apr.toFixed(4)}%`;
+  }
+
+  stream.write("\n# Summary\n");
+  stream.write(`# Days: ${days}\n`);
+  stream.write(`# Average APR: ${avgAprPct}\n`);
+  stream.write(`# Method: ${discovery.sourceFunction}\n`);
+  stream.write(`# Network: ${networkLabel}\n`);
   stream.end();
   console.log(`output written to ${outfile}`);
 }

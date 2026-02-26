@@ -1,6 +1,6 @@
-# Pareto Vault Monitoring
+# Vault Share Price Backfill
 
-Utilities to backfill on-chain share-price history into CSV from a vault URL or contract address.
+Utilities to backfill on-chain share-price history into CSV from any vault URL or contract address.
 
 ## Setup
 
@@ -17,22 +17,20 @@ The script also has built-in defaults and will split load/fail over across:
 
 ## LLM-Friendly Quick Start
 
-If you have a link like:
-
-`https://app.pareto.credit/vault#0x...`
+If you have any link containing a vault address (or a raw `0x...` address):
 
 run:
 
 ```bash
 node scripts/backfill-price.js \
-  --vault 'https://app.pareto.credit/vault#0x...' \
+  --vault 'https://some-app.example/vault/0x...' \
   --block-step 7200 \
   --out vault.csv
 ```
 
 The script will auto-discover:
 - whether the input is a token or price source contract
-- Pareto token `minter()` when present
+- token `minter()` when present
 - share-price function (`priceAA`, `priceBB`, `price`, `tokenPrice`, etc.)
 - deployment block for default backfill range
 
@@ -44,30 +42,40 @@ Default range is `deployment -> latest`.
 date,block,price
 ```
 
+Footer summary is appended at the end of the file:
+
+```text
+# Summary
+# Days: ...
+# Average APR: ...
+# Method: ...
+# Network: ...
+```
+
 ## Recommended Commands
 
 Fast sampled backfill (recommended):
 
 ```bash
 node scripts/backfill-price.js \
-  --vault 'https://app.pareto.credit/vault#0xEC6a70F62a83418c7fb238182eD2865F80491a8B' \
+  --vault 'https://some-app.example/vault/0x...' \
   --block-step 7200 \
-  --out rockawayx.csv
+  --out vault-fast.csv
 ```
 
 Exact daily backfill (slower):
 
 ```bash
 node scripts/backfill-price.js \
-  --vault 'https://app.pareto.credit/vault#0xEC6a70F62a83418c7fb238182eD2865F80491a8B' \
-  --out rockawayx-daily.csv
+  --vault 'https://some-app.example/vault/0x...' \
+  --out vault-daily.csv
 ```
 
 Discovery only (no file output):
 
 ```bash
 node scripts/backfill-price.js \
-  --vault 'https://app.pareto.credit/vault#0x...' \
+  --vault 'https://some-app.example/vault/0x...' \
   --discover-only
 ```
 
@@ -89,13 +97,14 @@ Notes:
 - Date parsing uses UTC midnight (`YYYY-MM-DDT00:00:00Z`).
 - If `--start-block` is earlier than source deployment, it is clamped to deploy block.
 - Script distributes RPC calls across the configured pool and retries/fails over on transient timeout/rate-limit/server errors.
+- `method` and `network` are included in the footer summary (not per-row columns).
 
 ## Dump Participant Addresses
 
 ```bash
 node scripts/dump-events.js \
-  --contract-address 0xEC6a70F62a83418c7fb238182eD2865F80491a8B \
-  --start-block 24000000 \
+  --contract-address 0xYourVaultOrTokenAddress \
+  --start-block 1 \
   --out participants.txt
 ```
 
