@@ -25,6 +25,9 @@ Run the script to generate a CSV containing `[date, block, price]` lines.
 
 ```bash
 npm run backfill -- --start-date 2024-01-01 --end-date 2025-02-25 --out history.csv
+
+# override target contract and function (e.g., AA minter proxy)
+npm run backfill -- --contract-address 0x9cF358aff79DeA96070A85F00c0AC79569970Ec3 --price-fn priceAA --start-date 2025-07-18 --end-date 2026-02-26 --out test.csv
 ```
 ### Additional utility: event/address dump
 
@@ -44,6 +47,9 @@ Arguments:
 - `--start-date` / `--end-date`: ISO dates to define the range.
 - `--start-block` / `--end-block`: alternative to specify numeric blocks.
 - `--out`: output CSV filename (default: `price-history.csv`).
+- `--contract-address`: optional target contract address (falls back to `CONTRACT_ADDRESS`/`VAULT_ADDRESS` from env).
+- `--price-fn`: optional explicit zero-arg view function to query (e.g. `priceAA`).
+- `--block-step`: optional fast sampling mode (e.g. `7200` for ~daily on mainnet).
 
 The script will fetch the contract ABI from Etherscan if an API key
 is supplied and automatically choose a view function whose name contains

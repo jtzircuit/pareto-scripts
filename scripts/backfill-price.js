@@ -16,6 +16,7 @@
  *   RPC_URL             compatible Ethereum endpoint
  *   ETHERSCAN_API_KEY   optional, for ABI/block lookups
  *   VAULT_ADDRESS       address of the tranche/vault contract
+ *   CONTRACT_ADDRESS    optional alias of VAULT_ADDRESS
  *
  * Example:
  *   cp .env.example .env
@@ -34,14 +35,10 @@ import { fileURLToPath } from "url";
 // load .env if present
 dotenv.config();
 
-const VAULT_ADDRESS = process.env.VAULT_ADDRESS;
+const ENV_CONTRACT_ADDRESS = process.env.CONTRACT_ADDRESS || process.env.VAULT_ADDRESS;
 const RPC_URL = process.env.RPC_URL || "https://ethereum-rpc.publicnode.com/";
 const ETHERSCAN_API_KEY = process.env.ETHERSCAN_API_KEY;
 
-if (!VAULT_ADDRESS) {
-  console.error("VAULT_ADDRESS must be set in env");
-  process.exit(1);
-}
 if (!RPC_URL) {
   // fallback default ensures this never triggers, but keep for safety
   console.error("RPC_URL must be set in env");
@@ -72,6 +69,15 @@ function parseArgs() {
       case "--out":
         out.outfile = args[++i];
         break;
+      case "--contract-address":
+        out.contractAddress = args[++i];
+        break;
+      case "--price-fn":
+        out.priceFn = args[++i];
+        break;
+      case "--block-step":
+        out.blockStep = parseInt(args[++i], 10);
+        break;
       default:
         console.warn(`unknown argument ${a}`);
     }
@@ -91,7 +97,25 @@ async function fetchAbi(address) {
   return JSON.parse(resp.data.result);
 }
 
-function pickPriceFunction(abi) {
+function pickPriceFunction(abi, requestedFn) {
+  if (requestedFn) {
+    const exact = abi.find(
+      (item) =>
+        item.type === "function" &&
+        item.name === requestedFn &&
+        (item.stateMutability === "view" || item.stateMutability === "pure")
+    );
+    if (!exact) {
+      throw new Error(`requested price function not found in ABI: ${requestedFn}`);
+    }
+    if (exact.inputs && exact.inputs.length > 0) {
+      throw new Error(
+        `requested price function requires ${exact.inputs.length} input(s); only zero-arg functions are supported`
+      );
+    }
+    return exact.name;
+  }
+
   // look for any view function that returns uint256 and has "price" in the name
   const candidates = abi.filter(
     (item) =>
@@ -107,7 +131,13 @@ function pickPriceFunction(abi) {
   }
   // prefer an exact match if present
   for (const fn of candidates) {
-    if (fn.name === "price" || fn.name === "tokenPrice" || fn.name === "tranchePrice") {
+    if (
+      fn.name === "price" ||
+      fn.name === "tokenPrice" ||
+      fn.name === "tranchePrice" ||
+      fn.name === "priceAA" ||
+      fn.name === "priceBB"
+    ) {
       return fn.name;
     }
   }
@@ -134,6 +164,11 @@ async function getBlockByTime(targetTs, low = 0, high = null) {
 
 async function main() {
   const opts = parseArgs();
+  const contractAddress = opts.contractAddress || ENV_CONTRACT_ADDRESS;
+  if (!contractAddress) {
+    console.error("set CONTRACT_ADDRESS/VAULT_ADDRESS in env or pass --contract-address");
+    process.exit(1);
+  }
   let startBlock = opts.startBlock;
   let endBlock = opts.endBlock;
 
@@ -154,7 +189,7 @@ async function main() {
 
   let abi;
   try {
-    abi = await fetchAbi(VAULT_ADDRESS);
+    abi = await fetchAbi(contractAddress);
     console.log("fetched ABI from Etherscan");
   } catch (err) {
     console.warn("could not fetch ABI from Etherscan, using minimal fallback");
@@ -181,23 +216,55 @@ async function main() {
         inputs: [],
         outputs: [{ type: "uint256" }],
       },
+      {
+        type: "function",
+        name: "priceAA",
+        stateMutability: "view",
+        inputs: [],
+        outputs: [{ type: "uint256" }],
+      },
+      {
+        type: "function",
+        name: "priceBB",
+        stateMutability: "view",
+        inputs: [],
+        outputs: [{ type: "uint256" }],
+      },
     ];
   }
 
-  const priceFn = pickPriceFunction(abi);
+  const priceFn = pickPriceFunction(abi, opts.priceFn);
   console.log(`using price function: ${priceFn}`);
+  console.log(`using contract address: ${contractAddress}`);
+  const blockStep = Number.isFinite(opts.blockStep) && opts.blockStep > 0 ? opts.blockStep : null;
+  if (blockStep) {
+    console.log(`using fast block-step mode: ${blockStep}`);
+  }
 
-  const contract = new ethers.Contract(VAULT_ADDRESS, abi, provider);
+  const contract = new ethers.Contract(contractAddress, abi, provider);
 
   const outfile = opts.outfile || "price-history.csv";
   const stream = fs.createWriteStream(outfile, { flags: "w" });
   stream.write("date,block,price\n");
 
+  let lastDate = "";
   for (let block = startBlock; block <= endBlock; ) {
     const blk = await provider.getBlock(block);
     const price = await contract[priceFn]({ blockTag: block });
     const date = new Date(blk.timestamp * 1000).toISOString().slice(0, 10);
-    stream.write(`${date},${block},${price.toString()}\n`);
+    if (date !== lastDate) {
+      stream.write(`${date},${block},${price.toString()}\n`);
+      lastDate = date;
+    }
+
+    if (blockStep) {
+      if (block === endBlock) break;
+      const nextBlock = Math.min(block + blockStep, endBlock);
+      if (nextBlock <= block) break;
+      block = nextBlock;
+      continue;
+    }
+
     // advance one day (approx) by timestamp
     const nextTs = blk.timestamp + 24 * 3600;
     const nextBlock = await getBlockByTime(nextTs, block + 1, endBlock);
