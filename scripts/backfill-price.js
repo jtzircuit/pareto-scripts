@@ -158,11 +158,29 @@ async function main() {
     console.log("fetched ABI from Etherscan");
   } catch (err) {
     console.warn("could not fetch ABI from Etherscan, using minimal fallback");
-    // minimal ABI with generic price function; user can modify
+    // fallback ABI described as JSON objects so pickPriceFunction can inspect
     abi = [
-      "function price() view returns (uint256)",
-      "function tokenPrice() view returns (uint256)",
-      "function tranchePrice() view returns (uint256)"
+      {
+        type: "function",
+        name: "price",
+        stateMutability: "view",
+        inputs: [],
+        outputs: [{ type: "uint256" }],
+      },
+      {
+        type: "function",
+        name: "tokenPrice",
+        stateMutability: "view",
+        inputs: [],
+        outputs: [{ type: "uint256" }],
+      },
+      {
+        type: "function",
+        name: "tranchePrice",
+        stateMutability: "view",
+        inputs: [],
+        outputs: [{ type: "uint256" }],
+      },
     ];
   }
 

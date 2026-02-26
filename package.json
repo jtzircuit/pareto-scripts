@@ -11,6 +11,7 @@
     "dotenv": "^16.3.1",
     "ethers": "^6.9.0"
   },
+  "type": "module",
   "engines": {
     "node": ">=18"
   },
